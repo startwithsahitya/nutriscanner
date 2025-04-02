@@ -77,7 +77,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> fetchDetailsFromGemini(String productName) async {
-    const apiKey = "AIzaSyAqCIPvKoybcGWjQFc3vD4Q8flL5lX8ODY";
+    const apiKey = "";
 
     final model = GenerativeModel(
       model: 'gemini-2.0-flash',
