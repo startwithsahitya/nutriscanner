@@ -3,6 +3,7 @@ import 'package:flutter_barcode_scanner/flutter_barcode_scanner.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:google_generative_ai/google_generative_ai.dart';
+import 'evalv.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -13,9 +14,27 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final TextEditingController barcodeController = TextEditingController();
+
+  // Product data and grades.
   String productName = '';
   String ingredients = '';
   String nutritionalContent = '';
+  String modelGrade =
+      ''; // Grade from the nutritional model (predictNutriScore)
+  String geminiGrade = ''; // Grade from Gemini's initial evaluation
+  String finalGrade = ''; // Combined grade from model and Gemini
+  String healthConditionGrade =
+      ''; // New grade based on health condition evaluation
+
+  // Health condition dropdown selections.
+  String selectedCondition = 'None';
+  final List<String> healthConditions = [
+    'None',
+    'Diabetes',
+    'Chronic Kidney Disease',
+    'Heart Disease',
+    'Celiac Disease'
+  ];
 
   @override
   void dispose() {
@@ -23,12 +42,23 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
+  // Scans a barcode and resets state.
   Future<void> scanBarcode() async {
     try {
       String barcode = await FlutterBarcodeScanner.scanBarcode(
           "#ff6666", "Cancel", true, ScanMode.BARCODE);
       if (barcode != "-1") {
-        barcodeController.text = barcode; // Update input field
+        setState(() {
+          productName = '';
+          ingredients = 'Fetching...';
+          nutritionalContent = 'Fetching...';
+          modelGrade = '';
+          geminiGrade = '';
+          finalGrade = '';
+          healthConditionGrade = '';
+          selectedCondition = 'None';
+        });
+        barcodeController.text = barcode;
         fetchProductData(barcode);
       }
     } catch (e) {
@@ -39,6 +69,7 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // Fetches product data from OpenFoodFacts.
   Future<void> fetchProductData(String barcode) async {
     if (barcode.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -46,7 +77,6 @@ class _HomePageState extends State<HomePage> {
       );
       return;
     }
-
     final url = 'https://world.openfoodfacts.org/api/v0/product/$barcode.json';
     try {
       final response = await http.get(Uri.parse(url));
@@ -56,10 +86,9 @@ class _HomePageState extends State<HomePage> {
           if (data['status'] == 1) {
             productName =
                 data['product']['product_name'] ?? 'No name available';
-            ingredients = 'Fetching';
-            nutritionalContent = 'Fetching ';
-
-            // Fetch details from Gemini AI
+            ingredients = 'Fetching...';
+            nutritionalContent = 'Fetching...';
+            // Fetch details (ingredients, nutritional info, and Gemini grade) from Gemini.
             fetchDetailsFromGemini(productName);
           } else {
             productName = 'Product not found';
@@ -76,35 +105,139 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  // Calls Gemini AI to fetch ingredients, nutritional info, and an initial grade.
   Future<void> fetchDetailsFromGemini(String productName) async {
     const apiKey = "";
-
     final model = GenerativeModel(
       model: 'gemini-2.0-flash',
       apiKey: apiKey,
     );
-
+    // Ask Gemini to return exactly three paragraphs: ingredients, nutritional info (as comma-separated values), and a grade.
     final prompt =
-        "No extra Text Give the Exact Value Strictly What are the ingredients and the nutritional content Also Give in the Format of 2 Paragraphs one is Ingredients and other is Nutritional Facts per 100g. Don't change the line, just change the line for the segregation (specifically providing a single value for each nutrient per 100 grams) of the following food product, keeping in mind it is from India: $productName. Give the Provided Things only Ingredients and Nutritional Information, no extra information. I certainly need only these Information. Just Give me only these info: energy_100g, saturated_fat_100g, sugars_100g, fiber_100g, proteins_100g, salt_100g, fruits_veggies_nuts_estimate_100g, carbohydrates_100g.";
+        "No extra text. Provide exactly three paragraphs separated by newlines. The first paragraph should only include the ingredients of $productName. The second paragraph should contain the nutritional facts per 100g of the $productName in the following format: \"Energy: X kcal, Saturated fat: Y g, Sugars: Z g, Fiber: W g, Proteins: V g, Salt: U g, Fruits_vegies_nuts_estimate: T g, Carbohydrates: S g.\" The third paragraph should only be a single letter (A–E) that represents the product's overall quality based solely on nutritional facts. Do not include any titles or extra text. Go easy on Grade no strict grading";
     final content = [Content.text(prompt)];
-
     try {
       final response = await model.generateContent(content);
       final geminiText = response.text ?? 'No response received';
-
-      List<String> details = geminiText.split('\n\n'); // Split into sections
-
-      // Assuming this is inside a Flutter stateful widget
+      List<String> details = geminiText.split('\n\n');
       setState(() {
         ingredients = details.isNotEmpty ? details[0] : 'No ingredients found';
         nutritionalContent =
             details.length > 1 ? details[1] : 'No nutritional info found';
+        geminiGrade = details.length > 2 ? details[2].trim().toUpperCase() : '';
+      });
+      // Calculate the grade from nutritional data.
+      calculateModelGrade();
+    } catch (e) {
+      print('Error fetching details from Gemini: $e');
+      setState(() {
+        ingredients = 'Error fetching details';
+        nutritionalContent = 'Error fetching nutritional info';
+        geminiGrade = '';
+      });
+    }
+  }
+
+  // Parses nutritionalContent and uses predictNutriScore to compute the grade from nutritional data.
+  void calculateModelGrade() {
+    String cleaned = nutritionalContent.trim();
+    if (cleaned.endsWith('.')) {
+      cleaned = cleaned.substring(0, cleaned.length - 1);
+    }
+    cleaned =
+        cleaned.replaceFirst(RegExp(r'^[Nn]utritional [Ii]nformation:\s*'), '');
+
+    List<String> parts = cleaned.split(',');
+    List<double> features = [];
+    RegExp regex = RegExp(r'([-+]?\d*\.?\d+)');
+    for (String part in parts) {
+      Match? match = regex.firstMatch(part.trim());
+      if (match != null) {
+        double value = double.parse(match.group(0)!);
+        features.add(value);
+      }
+    }
+    // Substitute extreme value if necessary.
+    if (features.length == 8 && features[6] == 0) {
+      features[6] = 63.75;
+    }
+
+    if (features.length == 8) {
+      String grade = predictNutriScore(features);
+      setState(() {
+        modelGrade = grade;
+      });
+      // Now combine Gemini and model grades.
+      combineGrades();
+    } else {
+      setState(() {
+        modelGrade = 'Insufficient data';
+      });
+    }
+  }
+
+  /// Combines the model grade and Gemini grade with weightage (0.55 for model, 0.45 for Gemini).
+  void combineGrades() {
+    Map<String, double> gradeMapping = {
+      'A': 5.0,
+      'B': 4.0,
+      'C': 3.0,
+      'D': 2.0,
+      'E': 1.0,
+    };
+    if (!gradeMapping.containsKey(modelGrade) ||
+        !gradeMapping.containsKey(geminiGrade)) {
+      setState(() {
+        finalGrade = 'Insufficient data';
+      });
+      return;
+    }
+    double modelScore = gradeMapping[modelGrade]!;
+    double geminiScore = gradeMapping[geminiGrade]!;
+    double combinedScore = 0.55 * modelScore + 0.45 * geminiScore;
+    String finalLetter;
+    if (combinedScore >= 4.3) {
+      finalLetter = 'A';
+    } else if (combinedScore >= 3.4) {
+      finalLetter = 'B';
+    } else if (combinedScore >= 2.5) {
+      finalLetter = 'C';
+    } else if (combinedScore >= 1.5) {
+      finalLetter = 'D';
+    } else {
+      finalLetter = 'E';
+    }
+    setState(() {
+      finalGrade = finalLetter;
+    });
+    // If a health condition is already selected, evaluate health condition grade.
+    if (selectedCondition != 'None') {
+      evaluateHealthCondition();
+    }
+  }
+
+  /// Sends a prompt to Gemini to compute an overall grade taking into account health condition.
+  void evaluateHealthCondition() async {
+    const apiKey = "";
+    final model = GenerativeModel(
+      model: 'gemini-2.0-flash',
+      apiKey: apiKey,
+    );
+    // Construct the prompt with nutritional facts, final grade and selected health condition.
+    final prompt =
+        "Based on the following nutritional facts: \"$nutritionalContent\", and the overall grade: \"$finalGrade\", and considering the health condition: \"$selectedCondition\", please re-evaluate and provide a single letter grade (A–E) reflecting the product's suitability for someone with that health condition. Respond with only the grade letter.";
+    final content = [Content.text(prompt)];
+    try {
+      final response = await model.generateContent(content);
+      final text = response.text ?? 'No response';
+      // Expecting a single letter grade in response.
+      setState(() {
+        healthConditionGrade = text.trim().toUpperCase();
       });
     } catch (e) {
-      print('Error fetching : $e');
+      print("Error evaluating health condition: $e");
       setState(() {
-        ingredients = 'Error fetching';
-        nutritionalContent = 'Error fetching ';
+        healthConditionGrade = 'Error';
       });
     }
   }
@@ -171,6 +304,63 @@ class _HomePageState extends State<HomePage> {
                 ),
                 child: Text(nutritionalContent,
                     style: const TextStyle(fontSize: 14)),
+              ),
+
+              const SizedBox(height: 10),
+              Text(
+                'Grade:',
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              Text(finalGrade, style: const TextStyle(fontSize: 18)),
+              const SizedBox(height: 20),
+              // New Health Condition Dropdown
+              Text(
+                'Health Condition:',
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              DropdownButton<String>(
+                value: selectedCondition,
+                items: healthConditions.map((String condition) {
+                  return DropdownMenuItem<String>(
+                    value: condition,
+                    child: Text(condition),
+                  );
+                }).toList(),
+                onChanged: (String? newValue) {
+                  if (newValue != null) {
+                    setState(() {
+                      selectedCondition = newValue;
+                      // If condition is not "None", evaluate the health condition grade.
+                      if (newValue != 'None') {
+                        evaluateHealthCondition();
+                      } else {
+                        healthConditionGrade = '';
+                      }
+                    });
+                  }
+                },
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Health Condition Grade:',
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.blue[50],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  healthConditionGrade.isNotEmpty
+                      ? healthConditionGrade
+                      : 'Not evaluated',
+                  style: const TextStyle(
+                      fontSize: 18, fontWeight: FontWeight.bold),
+                ),
               ),
             ],
           ),
